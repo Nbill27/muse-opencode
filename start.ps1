@@ -1,4 +1,4 @@
-# muse-local launcher — cookie/session based, loopback only, no API key.
+# muse-opencode launcher — cookie/session based, loopback only, no API key.
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
@@ -21,5 +21,5 @@ Get-NetTCPConnection -LocalPort 20233 -State Listen -ErrorAction SilentlyContinu
     Select-Object -ExpandProperty OwningProcess -Unique |
     ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
 
-Write-Host "muse-local -> http://127.0.0.1:20233/v1  (model: muse-chat)"
+Write-Host "muse-opencode -> http://127.0.0.1:20233/v1  (model: muse-chat)"
 & $py -m museai

@@ -1,8 +1,10 @@
-# muse-local
+# muse-opencode
 
-![oke pahlawan datang!](docs/pahlawan.jpeg)
+<p align="center">
+  <img src="docs/pahlawan.jpeg" width="320" alt="oke pahlawan datang!" />
+</p>
 
-**muse-local** adalah backend lokal yang membungkus webchat [muse.ai](https://muse.ai) menjadi API **OpenAI-compatible** (`/v1/chat/completions`), sehingga alat apa pun yang bisa bicara ke API OpenAI — termasuk opencode — bisa memakai akun muse.ai Anda **tanpa API key, tanpa VPS, tanpa worker eksternal**. Autentikasi dilakukan lewat **cookie sesi browser** (`session.json`) dan seluruh interaksi ke muse.ai dijalankan oleh Chromium headless (CDP) yang hidup di mesin yang sama.
+**muse-opencode** adalah backend lokal yang membungkus webchat [muse.ai](https://muse.ai) menjadi API **OpenAI-compatible** (`/v1/chat/completions`), sehingga alat apa pun yang bisa bicara ke API OpenAI — termasuk opencode — bisa memakai akun muse.ai Anda **tanpa API key, tanpa VPS, tanpa worker eksternal**. Autentikasi dilakukan lewat **cookie sesi browser** (`session.json`) dan seluruh interaksi ke muse.ai dijalankan oleh Chromium headless (CDP) yang hidup di mesin yang sama.
 
 **Status: berjalan dan sudah diuji end-to-end.** Latensi nyata untuk satu balasan: ±28 detik — dominasi waktu generasi muse.ai sendiri plus polling "selesai mengetik", bukan overhead relay.
 
@@ -34,7 +36,7 @@ muse.ai adalah layanan chat berbasis AI yang diakses lewat **webchat biasa** —
 opencode / klien OpenAI mana pun
         │  POST http://127.0.0.1:20233/v1/chat/completions
         ▼
-muse-local (FastAPI relay, loopback only)          ← di mesin Anda
+muse-opencode (FastAPI relay, loopback only)          ← di mesin Anda
         │  prompt diratakan (flatten), system prompt dibuang
         ▼
 Chromium headless (CDP port 19211)                 ← di mesin Anda
@@ -55,7 +57,7 @@ Karena browser-nya jalan lokal dan cookie ada di mesin Anda, **tidak ada kompone
 - **Pembersihan system prompt** — prompt `system`/`developer` (misal AGENTS.md dari opencode) dibuang otomatis agar tidak bocor ke webchat muse.ai.
 - **Follow-up pintar** — bila percakapan sudah terbuka di tab muse.ai dan history cocok, hanya teks baru yang dikirim, bukan seluruh percakapan.
 - **Konkurensi serial** — `account_max_concurrency=1`; satu tab dipakai bergantian (menjaga rate limit muse.ai).
-- **Launcher satu perintah** (`start.ps1`) — bootstrap venv, pribebeaskan port, jalankan server.
+- **Launcher satu perintah** (`start.ps1`) — bootstrap venv, membebaskan port, jalankan server.
 
 ## Tech Stack
 
@@ -69,7 +71,7 @@ Karena browser-nya jalan lokal dan cookie ada di mesin Anda, **tidak ada kompone
 | Protokol browser | websockets ≥ 13.0 | Koneksi CDP ke Chromium |
 | Browser | Chrome / Edge | Mengoperasikan webchat muse.ai |
 
-> muse-local **bukan** paket yang diinstal via `pip install museai`. Kode dijalankan lewat `PYTHONPATH`; `pyproject.toml` dipakai untuk metadata dan tooling dev (ruff, pytest).
+> muse-opencode **bukan** paket yang diinstal via `pip install museai`. Kode dijalankan lewat `PYTHONPATH`; `pyproject.toml` dipakai untuk metadata dan tooling dev (ruff, pytest).
 
 ## Prasyarat
 
@@ -85,7 +87,7 @@ Tidak butuh: Docker, Node.js, Redis, atau database apa pun. Semua state disimpan
 Pastikan struktur folder root terlihat seperti ini:
 
 ```powershell
-Set-Location D:\project\muse-local
+Set-Location D:\project\muse-opencode
 Get-ChildItem
 ```
 
@@ -129,27 +131,37 @@ Bila belum ada atau cookie telah mati, lihat bagian [Cara Mendapatkan Cookie Bar
 
 ## Cara Pakai
 
+Intinya tiga langkah: **nyalakan relay → pastikan hidup → sambungkan klien.** Dua perintah pertama di terminal, satu di klien.
+
+### Langkah 1 — Nyalakan relay
+
 ```powershell
-Set-Location D:\project\muse-local
+Set-Location D:\project\muse-opencode
 .\start.ps1
 ```
 
-`start.ps1` melakukan empat hal:
+Terminal harus **tetap terbuka** — server mati kalau jendelanya ditutup.
+
+`start.ps1` otomatis menangani setup awal:
 
 1. **Venv** — bila `.venv\Scripts\python.exe` belum ada, dibuat dan diinstal: fastapi, uvicorn[standard], pydantic, pydantic-settings, httpx[socks], websockets.
-2. **Cek `session.json`** — bila tidakt ada, muncul peringatan bahwa chat akan 503 sampai file ada.
-3. **Pribebeaskan port 20233** — proses lama yang mendengarkan 20233 dihentikan otomatis (mencegah `[Errno 10048]`).
+2. **Cek `session.json`** — bila tidak ada, muncul peringatan bahwa chat akan 503 sampai file ada.
+3. **Membebaskan port 20233** — proses lama yang mendengarkan 20233 dihentikan otomatis (mencegah `[Errno 10048]`).
 4. **Set `PYTHONPATH` ke `src`** lalu jalankan `python -m museai`.
 
-Output awal yang diharapkan:
+### Langkah 2 — Pastikan relay hidup
+
+Output ini yang ditunggu:
 
 ```
-muse-local -> http://127.0.0.1:20233/v1  (model: muse-chat)
+muse-opencode -> http://127.0.0.1:20233/v1  (model: muse-chat)
 INFO:     Started server process [12345]
 INFO:     Uvicorn running on http://127.0.0.1:20233 (Press CTRL+C to quit)
 ```
 
-### Uji cepat
+Kalau itu muncul, relay siap. Lanjut ke langkah 3.
+
+### Langkah 3 — Uji cepat
 
 ```powershell
 # daftar model
@@ -192,9 +204,9 @@ Tambahkan provider ini di `C:\Users\NABIL\.config\opencode\opencode.json`:
 
 ```json
 "provider": {
-  "muse-local": {
+  "muse-opencode": {
     "npm": "@ai-sdk/openai-compatible",
-    "name": "Muse Local",
+    "name": "Muse OpenCode",
     "options": {
       "baseURL": "http://127.0.0.1:20233/v1",
       "apiKey": "dummy"
@@ -208,16 +220,16 @@ Tambahkan provider ini di `C:\Users\NABIL\.config\opencode\opencode.json`:
 
 `apiKey` mengisi saja `dummy` — relay loopback ini tidak memeriksa key.
 
-> ⚠️ **Jangan set `small_model` opencode ke `muse-local`.** opencode memakai `small_model` untuk generate judul sesi; kalau lewat muse-local, setiap mulai percakapan akan menambah jeda 25+ detik dan membajak tab browser. Konfigurasi yang dipakai proyek ini: `"small_model": "9router/dahl/zai-org/GLM-5.3-Flash"`.
+> ⚠️ **Jangan set `small_model` opencode ke `muse-opencode`.** opencode memakai `small_model` untuk generate judul sesi; kalau lewat muse-opencode, setiap mulai percakapan akan menambah jeda 25+ detik dan membajak tab browser. Konfigurasi yang dipakai proyek ini: `"small_model": "9router/dahl/zai-org/GLM-5.3-Flash"`.
 
-Setelah disetel, restart opencode lalu pilih model `muse-local/muse-chat`.
+Setelah disetel, restart opencode lalu pilih model `muse-opencode/muse-chat`.
 
 ## Arsitektur
 
 ### Struktur direktori
 
 ```
-D:\project\muse-local\
+D:\project\muse-opencode\
 ├── .venv\                        # venv lokal
 ├── data\
 │   ├── browser-profile\          # profil Chromium permanen
@@ -353,7 +365,7 @@ $env:MUSE2API_LOG_LEVEL = "DEBUG"
 ```
 
 ```json
-{"object":"list","data":[{"id":"muse-chat","object":"model","created":...,"owned_by":"muse-local"}]}
+{"object":"list","data":[{"id":"muse-chat","object":"model","created":...,"owned_by":"muse"}]}
 ```
 
 ### `POST /v1/chat/completions`
@@ -441,3 +453,14 @@ Sudah diperbaiki lewat filter di `core/prompt.py`. Bila terulang: pastikan `flat
 - **Cookie rot tidak terdeterministik** — muse.ai bisa memutar pola cookie kapan pun; refresh manual adalah jalannya.
 - **Konkurensi 1 tab** — request bersamaan diantrikan, bukan error.
 - **Tidak ada API resmi** — proyek memakai webchat via browser. Bila muse.ai mengubah UI, driver bisa rusak; perbaikannya ada di `drivers/browser/driver.py` dan `drivers/browser/dom/`.
+
+## Disclaimer — For Educational Purposes Only
+
+Proyek ini dibuat **untuk tujuan edukasi dan pembelajaran pribadi** — mempelajari cara kerja relay API OpenAI-compatible, otomasi browser via CDP, dan integrasi dengan alat lokal seperti [opencode](https://opencode.ai).
+
+- **Bukan produk resmi.** Tidak berafiliasi, tidak didukung, dan tidak diendorse oleh [muse.ai](https://muse.ai).
+- **Seluruh permintaan berasal dari akun muse.ai Anda sendiri** — batas rate layanan resmi tetap berlaku.
+- **Gunakan sesuai tanggung jawab Anda** — risiko akun (rate limit, ban, perubahan UI) ditanggung sendiri; ini proyek belajar, bukan layanan produksi.
+- **Jangan dipakai komersial** atau dibagikan aksesnya ke orang lain.
+
+Bila muse.ai berubah UI atau menghentikan akses webchat, proyek ini bisa langsung tidak terpakai — anggap ini eksperimen, bukan fondasi.
