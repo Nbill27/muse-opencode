@@ -46,7 +46,13 @@ class Account(BaseModel):
         if not self.enabled or self.status == AccountStatus.INVALID:
             return False
         if self.status == AccountStatus.COOLING:
-            return (now or _now()) >= self.cooldown_until
+            if (now or _now()) >= self.cooldown_until:
+                # Heal the record once the cooldown has actually elapsed, otherwise
+                # /admin/accounts keeps reporting "cooling" on a usable account.
+                self.status = AccountStatus.ACTIVE
+                self.cooldown_until = 0.0
+                return True
+            return False
         return True
 
     def public(self) -> dict[str, Any]:

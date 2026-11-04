@@ -7,6 +7,7 @@ drivers can attach them as files.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,11 +49,39 @@ def _content_to_text(content: Any, images: list[str]) -> str:
     return "\n".join(p for p in parts if p)
 
 
+_SYSTEM_UPDATE_RE = re.compile(r"<system-update>.*?</system-update>", re.DOTALL | re.IGNORECASE)
+_HARNESS_HEADER_RE = re.compile(
+    r"^[ \t]*Instructions from:[ \t]*\S.*$", re.MULTILINE | re.IGNORECASE
+)
+_NO_LONGER_APPLY_RE = re.compile(
+    r"^[ \t]*The instructions from[ \t]+\S.*no longer apply\.?[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def strip_harness_noise(text: str) -> str:
+    """Remove harness-injected instructions that clients smuggle in as user turns.
+
+    opencode (and similar clients) push ``AGENTS.md`` / ``README.md`` context as a
+    ``user`` message wrapped in ``<system-update>`` blocks. Those are instructions for
+    the local coding agent, not dialogue, so they must never reach the muse web chat.
+    """
+    if not text:
+        return ""
+    cleaned = _SYSTEM_UPDATE_RE.sub("", text)
+    cleaned = _HARNESS_HEADER_RE.sub("", cleaned)
+    cleaned = _NO_LONGER_APPLY_RE.sub("", cleaned)
+    if cleaned == text:
+        return text.strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def message_turns(messages: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Role/text pairs, using the same text extraction as ``flatten_messages``."""
     turns: list[tuple[str, str]] = []
     for msg in messages:
-        text = _content_to_text(msg.get("content"), []).strip()
+        text = strip_harness_noise(_content_to_text(msg.get("content"), [])).strip()
         if text:
             turns.append((msg.get("role", "user"), text))
     return turns
@@ -86,7 +115,7 @@ def flatten_messages(messages: list[dict[str, Any]]) -> FlatPrompt:
     turns: list[tuple[str, str]] = []
     for msg in messages:
         role = msg.get("role", "user")
-        text = _content_to_text(msg.get("content"), images).strip()
+        text = strip_harness_noise(_content_to_text(msg.get("content"), images)).strip()
         if text:
             turns.append((role, text))
 

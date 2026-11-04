@@ -33,7 +33,12 @@ class Gateway:
             yield lease
 
     def _should_retry(self, exc: UpstreamError, attempt: int) -> bool:
-        return exc.retryable and attempt < self.max_failover
+        if not exc.retryable or attempt >= self.max_failover:
+            return False
+        # With a single account there is nowhere to fail over to: the retry just
+        # re-runs the same path and the pool reports "no usable account" instead
+        # of the real upstream error.
+        return len(self.pool.all()) > 1
 
     async def chat_stream(self, req: ChatRequest) -> AsyncIterator[str]:
         tried: list[str] = []

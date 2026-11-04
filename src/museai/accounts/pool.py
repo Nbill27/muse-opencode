@@ -19,7 +19,12 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Protocol
 
-from ..errors import NoAccountAvailable, UpstreamAuthError, UpstreamQuotaError
+from ..errors import (
+    NoAccountAvailable,
+    UpstreamAuthError,
+    UpstreamQuotaError,
+    UpstreamTimeout,
+)
 from .model import Account, AccountStatus
 from .store import AccountStore
 
@@ -188,18 +193,37 @@ class AccountPool:
         }
 
     # ---- scheduling ----
+    def _soonest_recovery(self) -> float | None:
+        """Earliest wall-clock time a currently cooling account becomes usable again."""
+        now = time.time()
+        pending = [
+            acc.cooldown_until
+            for acc in self._accounts.values()
+            if acc.enabled
+            and acc.status == AccountStatus.COOLING
+            and acc.cooldown_until > now
+        ]
+        return min(pending) if pending else None
+
     def _candidates(self, exclude: Iterable[str]) -> tuple[list[Account], bool]:
         """Returns (free candidates, whether any usable account is merely busy)."""
         now = time.time()
         excluded = set(exclude)
+        horizon = now + self.acquire_timeout
         free, busy = [], False
         for acc in self._accounts.values():
-            if acc.id in excluded or not acc.is_available(now):
+            if acc.id in excluded:
                 continue
-            if self._inflight[acc.id] >= self.max_concurrency:
+            if acc.is_available(now):
+                if self._inflight[acc.id] >= self.max_concurrency:
+                    busy = True
+                    continue
+                free.append(acc)
+                continue
+            # Cooling down but back before we would give up: worth waiting for
+            # instead of reporting the pool as empty.
+            if acc.enabled and acc.status == AccountStatus.COOLING and now < acc.cooldown_until <= horizon:
                 busy = True
-                continue
-            free.append(acc)
         return free, busy
 
     async def acquire(self, *, exclude: Iterable[str] = (), hint: str | None = None) -> Account:
@@ -218,8 +242,13 @@ class AccountPool:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise NoAccountAvailable("all accounts are busy, try again later")
+                wait = remaining
+                recovery = self._soonest_recovery()
+                if recovery is not None:
+                    # No one notifies us when a cooldown elapses, so wake up then.
+                    wait = min(wait, max(0.05, recovery - time.time()))
                 try:
-                    await asyncio.wait_for(self._cond.wait(), timeout=remaining)
+                    await asyncio.wait_for(self._cond.wait(), timeout=wait)
                 except asyncio.TimeoutError:
                     continue
 
@@ -246,6 +275,10 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + max(self.cooldown, 3600)
             log.warning("account %s out of quota, cooling down", acc.id)
+        elif isinstance(error, UpstreamTimeout):
+            # A slow generation is upstream latency, not a dead account. Cooling
+            # here would turn one late reply into minutes of zero capacity.
+            log.warning("account %s timed out, staying active: %s", acc.id, error)
         elif getattr(error, "retryable", False):
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown
