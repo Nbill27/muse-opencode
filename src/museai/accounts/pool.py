@@ -10,6 +10,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import logging
 import time
@@ -57,10 +58,14 @@ class AffinityStrategy:
         if hint and (acc_id := self._map.get(hint)):
             for acc in candidates:
                 if acc.id == acc_id:
+                    # Re-insert at the tail so a hot hint is never the one evicted.
+                    self._map[hint] = self._map.pop(hint)
                     return acc
         acc = self._fallback.choose(candidates, hint)
         if hint:
+            self._map.pop(hint, None)
             if len(self._map) >= self._max:
+                # dicts keep insertion order, so the head is the coldest hint.
                 self._map.pop(next(iter(self._map)))
             self._map[hint] = acc.id
         return acc
@@ -93,15 +98,20 @@ class AccountPool:
         max_concurrency: int = 1,
         cooldown: float = 120.0,
         acquire_timeout: float = 60.0,
+        persist_debounce: float = 1.0,
     ) -> None:
         self.store = store
         self.strategy: Strategy = STRATEGIES[strategy]()
         self.max_concurrency = max(1, max_concurrency)
         self.cooldown = cooldown
         self.acquire_timeout = acquire_timeout
+        self.persist_debounce = max(0.0, persist_debounce)
         self._accounts: dict[str, Account] = {}
         self._inflight: dict[str, int] = defaultdict(int)
         self._cond = asyncio.Condition()
+        self._dirty = False
+        self._flush_task: asyncio.Task | None = None
+        self._flush_lock = asyncio.Lock()
 
     # ---- lifecycle / CRUD ----
     async def load(self) -> None:
@@ -109,7 +119,42 @@ class AccountPool:
         log.info("loaded %d account(s)", len(self._accounts))
 
     async def persist(self) -> None:
-        await self.store.save(list(self._accounts.values()))
+        """Mark state dirty and schedule a coalesced flush.
+
+        Health counters change on every request, so writing the whole store
+        per release turns each generation into an extra disk round-trip.
+        Callers that need durability now should ``await flush()`` instead.
+        """
+        self._dirty = True
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._debounced_flush())
+
+    async def _debounced_flush(self) -> None:
+        try:
+            await asyncio.sleep(self.persist_debounce)
+        except asyncio.CancelledError:
+            raise
+        await self.flush()
+
+    async def flush(self) -> None:
+        """Write the current snapshot to disk immediately (no-op when clean)."""
+        async with self._flush_lock:
+            if not self._dirty:
+                return
+            self._dirty = False
+            try:
+                await self.store.save(list(self._accounts.values()))
+            except BaseException:
+                self._dirty = True
+                raise
+
+    async def shutdown(self) -> None:
+        task, self._flush_task = self._flush_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self.flush()
 
     def all(self) -> list[Account]:
         return list(self._accounts.values())
@@ -121,14 +166,16 @@ class AccountPool:
         async with self._cond:
             self._accounts[account.id] = account
             self._cond.notify_all()
-        await self.persist()
+        self._dirty = True
+        await self.flush()
         return account
 
     async def remove(self, account_id: str) -> bool:
         async with self._cond:
             removed = self._accounts.pop(account_id, None) is not None
         if removed:
-            await self.persist()
+            self._dirty = True
+            await self.flush()
         return removed
 
     def stats(self) -> dict[str, int]:

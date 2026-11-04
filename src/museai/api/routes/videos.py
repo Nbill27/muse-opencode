@@ -46,7 +46,7 @@ async def create_video(body: VideoCreateRequest, request: Request,
 
     request_meta = {"model": spec.id, "prompt": body.prompt, "size": body.size,
                     "duration": body.duration or body.seconds, "has_first_frame": bool(first_frame)}
-    task = svc.tasks.submit("video", request_meta, runner)
+    task = await svc.tasks.submit("video", request_meta, runner)
     return _task_view(task)
 
 

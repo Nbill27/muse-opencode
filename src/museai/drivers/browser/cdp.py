@@ -49,7 +49,7 @@ class CDPSession:
                         else:
                             fut.set_result(msg.get("result", {}))
                 elif method := msg.get("method"):
-                    for cb in self._listeners.get(method, ()):
+                    for cb in tuple(self._listeners.get(method, ())):
                         try:
                             cb(msg.get("params", {}))
                         except Exception:  # noqa: BLE001
@@ -61,9 +61,25 @@ class CDPSession:
                 if not fut.done():
                     fut.set_exception(CDPError("cdp connection closed"))
             self._pending.clear()
+            self._listeners.clear()
 
-    def on(self, method: str, callback: Callable[[dict], None]) -> None:
+    def on(self, method: str, callback: Callable[[dict], None]) -> Callable[[], None]:
+        """Subscribe to a CDP event. Returns an unsubscribe callable."""
         self._listeners[method].append(callback)
+
+        def _off() -> None:
+            self.off(method, callback)
+
+        return _off
+
+    def off(self, method: str, callback: Callable[[dict], None]) -> None:
+        handlers = self._listeners.get(method)
+        if not handlers:
+            return
+        with contextlib.suppress(ValueError):
+            handlers.remove(callback)
+        if not handlers:
+            self._listeners.pop(method, None)
 
     async def send(self, method: str, params: dict | None = None, timeout: float = 30.0) -> dict:
         if self.closed:
@@ -95,3 +111,5 @@ class CDPSession:
         self._reader.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await self._reader
+        # Handlers must not outlive the session: they hold driver/pool references.
+        self._listeners.clear()

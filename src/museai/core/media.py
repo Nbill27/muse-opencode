@@ -22,6 +22,7 @@ _EXT_BY_MIME = {
     "video/quicktime": ".mov",
 }
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9]+$")
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class MediaStore:
@@ -48,22 +49,40 @@ class MediaStore:
         return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
-async def load_image_ref(ref: str, *, timeout: float = 20.0) -> tuple[bytes, str]:
-    """Decode a data URL or download an http(s) URL. Returns ``(bytes, mime)``."""
+async def load_image_ref(
+    ref: str, *, timeout: float = 20.0, max_bytes: int = MAX_IMAGE_BYTES
+) -> tuple[bytes, str]:
+    """Decode a data URL or download an http(s) URL. Returns ``(bytes, mime)``.
+
+    Remote fetches are bounded: ``Content-Length`` is checked before reading and
+    the body is streamed so an oversized or endless response cannot exhaust RAM.
+    """
     ref = ref.strip()
     if ref.startswith("data:"):
         header, _, payload = ref.partition(",")
         mime = header[5:].split(";")[0] or "image/png"
+        if len(payload) // 4 * 3 > max_bytes:
+            raise InvalidRequest(f"image too large (limit {max_bytes} bytes)")
         try:
             return base64.b64decode(payload), mime
         except ValueError as exc:
             raise InvalidRequest("invalid base64 image data") from exc
     if ref.startswith(("http://", "https://")):
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(ref)
-            resp.raise_for_status()
-            mime = resp.headers.get("content-type", "image/png").split(";")[0]
-            return resp.content, mime
+            async with client.stream("GET", ref) as resp:
+                resp.raise_for_status()
+                mime = resp.headers.get("content-type", "image/png").split(";")[0]
+                declared = resp.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > max_bytes:
+                    raise InvalidRequest(f"image too large (limit {max_bytes} bytes)")
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        raise InvalidRequest(f"image too large (limit {max_bytes} bytes)")
+                return bytes(buf), mime
+    if len(ref) // 4 * 3 > max_bytes:
+        raise InvalidRequest(f"image too large (limit {max_bytes} bytes)")
     try:
         return base64.b64decode(ref, validate=True), "image/png"
     except ValueError as exc:

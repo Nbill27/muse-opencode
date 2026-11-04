@@ -55,6 +55,8 @@ STABLE_POLLS_DONE = 4
 STABLE_POLLS_FORCE = 12
 # Past this many assistant bubbles the page gets slow and a new thread is cheaper.
 HOT_BUBBLE_LIMIT = 16
+# One account = one browser context; extra images run on throwaway tabs.
+MAX_PARALLEL_IMAGES = 3
 
 
 def is_thread_url(url: str) -> bool:
@@ -69,6 +71,7 @@ class _Tab:
     context_id: str
     target_id: str
     session: CDPSession
+    key: str = ""
     hint: str | None = None
     turns: list[tuple[str, str]] = field(default_factory=list)
     image_count: int = 0
@@ -112,18 +115,19 @@ class BrowserDriver(MuseDriver):
         return {"driver": self.name, "ok": ok, "tabs": len(self._tabs)}
 
     # ------------------------------------------------------------ tabs
-    async def _tab(self, account: Account) -> _Tab:
+    async def _tab(self, account: Account, key: str | None = None) -> _Tab:
+        slot = key if key is not None else account.id
         async with self._tab_lock:
-            tab = self._tabs.get(account.id)
+            tab = self._tabs.get(slot)
             if tab and not tab.session.closed:
                 return tab
             if tab:
                 await self._close_tab(tab)
-            tab = await self._open_tab(account)
-            self._tabs[account.id] = tab
+            tab = await self._open_tab(account, key=slot)
+            self._tabs[slot] = tab
             return tab
 
-    async def _open_tab(self, account: Account) -> _Tab:
+    async def _open_tab(self, account: Account, key: str = "") -> _Tab:
         if missing := muse.missing_session_cookies(account.cookies):
             raise UpstreamAuthError(f"account is missing session cookies: {', '.join(missing)}")
         assert self._browser and self._chromium
@@ -139,10 +143,10 @@ class BrowserDriver(MuseDriver):
         for domain in ("Page", "Runtime", "Network"):
             await session.send(f"{domain}.enable")
         await self._set_cookies(session, account)
-        return _Tab(account.id, context_id, target_id, session)
+        return _Tab(account.id, context_id, target_id, session, key=key or account.id)
 
     async def _close_tab(self, tab: _Tab) -> None:
-        self._tabs.pop(tab.account_id, None)
+        self._tabs.pop(tab.key or tab.account_id, None)
         await tab.session.close()
         if self._browser and not self._browser.closed:
             with contextlib.suppress(Exception):
@@ -249,7 +253,6 @@ class BrowserDriver(MuseDriver):
             await asyncio.sleep(0.25)
             with contextlib.suppress(CDPError):
                 state = await tab.session.evaluate(dom.PAGE_STATE) or {}
-                log.info("PAGE_STATE check: %s", state)
                 if state.get("ready"):
                     return
         head = (state.get("head") or "").lower()
@@ -296,8 +299,9 @@ class BrowserDriver(MuseDriver):
             raise UpstreamQuotaError("muse.ai reports the account is out of quota")
         return state
 
-    async def _prepare(self, account: Account, prompt: str, images: list[InputImage]):
-        tab = await self._tab(account)
+    async def _prepare(self, account: Account, prompt: str, images: list[InputImage],
+                       key: str | None = None):
+        tab = await self._tab(account, key=key)
         try:
             await self._new_thread(tab)
             base = await self._state(tab)
@@ -477,8 +481,9 @@ class BrowserDriver(MuseDriver):
                            width=att.get("w") or None, height=att.get("h") or None)
 
     async def _generate(self, account: Account, prompt: str, images: list[InputImage],
-                        kind: str, timeout: float, on_progress, cancel) -> MediaResult:
-        tab, base = await self._prepare(account, prompt, images)
+                        kind: str, timeout: float, on_progress, cancel,
+                        key: str | None = None) -> MediaResult:
+        tab, base = await self._prepare(account, prompt, images, key=key)
         try:
             att = await self._wait_media(tab, base, kind, timeout, on_progress, cancel)
             return await self._download(tab, att, kind)
@@ -488,13 +493,38 @@ class BrowserDriver(MuseDriver):
 
     async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:
         prompt = self._media_prompt(req.prompt, "image", req.size)
-        results = []
-        for _ in range(max(1, req.n)):
+        n = max(1, req.n)
+        if n == 1:
             r = await self._generate(account, prompt, req.reference_images, "image",
                                      req.timeout, req.on_progress, req.cancel)
             r.revised_prompt = req.prompt
-            results.append(r)
-        return results
+            return [r]
+
+        # One tab per account is shared, so fan-out gets throwaway tabs keyed
+        # "<account>#img<i>" and each task disposes of its own on the way out.
+        limit = asyncio.Semaphore(MAX_PARALLEL_IMAGES)
+
+        async def one(i: int) -> MediaResult:
+            key = f"{account.id}#img{i}"
+            async with limit:
+                try:
+                    r = await self._generate(account, prompt, req.reference_images, "image",
+                                             req.timeout, req.on_progress, req.cancel, key=key)
+                finally:
+                    tab = self._tabs.get(key)
+                    if tab:
+                        await self._close_tab(tab)
+            r.revised_prompt = req.prompt
+            return r
+
+        tasks = [asyncio.create_task(one(i)) for i in range(n)]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def generate_video(self, account: Account, req: VideoRequest) -> MediaResult:
         prompt = self._media_prompt(req.prompt, "video", req.size, req.duration)

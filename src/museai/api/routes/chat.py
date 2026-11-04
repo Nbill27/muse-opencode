@@ -24,6 +24,8 @@ router = APIRouter(tags=["chat"], dependencies=[Depends(require_api_key)])
 
 
 def _approx_tokens(text: str) -> int:
+    """Rough 4-chars-per-token guess. muse.ai reports no token counts, so every
+    usage block carries ``estimated: True`` — never bill on these numbers."""
     return max(1, len(text) // 4)
 
 
@@ -69,6 +71,7 @@ async def chat_completions(body: ChatCompletionRequest, svc: Services = Depends(
                 "prompt_tokens": _approx_tokens(flat.text),
                 "completion_tokens": _approx_tokens(text),
                 "total_tokens": _approx_tokens(flat.text) + _approx_tokens(text),
+                "estimated": True,
             },
         }
 
@@ -96,6 +99,7 @@ async def chat_completions(body: ChatCompletionRequest, svc: Services = Depends(
                 usage = {"prompt_tokens": _approx_tokens(flat.text),
                          "completion_tokens": _approx_tokens(produced)}
                 usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                usage["estimated"] = True
                 yield _sse({"id": completion_id, "object": "chat.completion.chunk",
                             "created": created, "model": model_name, "choices": [],
                             "usage": usage})
