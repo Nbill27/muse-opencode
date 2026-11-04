@@ -1,5 +1,9 @@
 # muse-opencode
 
+<p align="center">
+  <img src="docs/pahlawan.jpeg" alt="Pahlawan datang" width="220">
+</p>
+
 A local, OpenAI-compatible HTTP relay that drives **your own muse.ai web chat** through a real Chromium tab over the Chrome DevTools Protocol. It exposes `/v1/chat/completions`, `/v1/models`, `/v1/images/generations`, `/v1/videos`, and a small admin API — so any OpenAI client (opencode, the OpenAI SDK, LangChain, plain `curl`) can talk to muse.ai without an official API key.
 
 > **For Educational Purposes Only.** See [Disclaimer](#14-disclaimer).
